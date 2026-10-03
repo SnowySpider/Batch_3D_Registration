@@ -1,3 +1,27 @@
+/*-
+ * #%L
+ * Scijava plugin for automatic 3D registration
+ * %%
+ * Copyright (C) 2019 - 2026 Andrew McCall, University at Buffalo
+ * %%
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public
+ * License along with this program.  If not, see
+ * <http://www.gnu.org/licenses/gpl-3.0.html>.
+ * #L%
+ */
+
+package batch3Dregistration;
+
 import com.google.common.collect.EvictingQueue;
 import io.scif.config.SCIFIOConfig;
 import io.scif.services.DatasetIOService;
@@ -25,8 +49,9 @@ import net.imglib2.view.Views;
 import org.apache.commons.lang3.tuple.MutableTriple;
 import org.scijava.app.StatusService;
 import org.scijava.command.Command;
+import org.scijava.command.DynamicCommand;
+import org.scijava.legacy.service.OpEnvironmentService;
 import org.scijava.log.LogService;
-import org.scijava.ops.api.OpEnvironment;
 import org.scijava.plugin.Parameter;
 import org.scijava.plugin.Plugin;
 import org.scijava.ui.UIService;
@@ -43,9 +68,11 @@ import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import outofboundsspherical.OutOfBoundsSpherical3DFactory;
+
 import static org.scijava.ItemVisibility.MESSAGE;
 
-@Plugin(type = Command.class, headless = true, menuPath = "Plugins>Registration>Batch 3D Registration")
+@Plugin(type = DynamicCommand.class, headless = true, menuPath = "Plugins>Registration>Batch 3D Registration")
 public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleRealTransform> implements Command {
 
     @Parameter
@@ -64,7 +91,7 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
     protected DatasetIOService datasetIOService;
 
     @Parameter
-    protected OpEnvironment ops;
+    protected OpEnvironmentService ops;
 
     @Parameter
     protected OpService ijOps;
@@ -107,6 +134,8 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
 
     protected void initializePlugin(Dataset referenceImage){
         if(saveFolder != null) saveFolder.mkdirs();
+
+
 
         config = new SCIFIOConfig();
         config.writerSetFailIfOverwriting(false);
@@ -259,11 +288,6 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
     private AffineTransform3D alignSubsampledImages(RandomAccessibleInterval referenceSubsampled, RandomAccessibleInterval movingSubsampled, B3dParameters resolutionParams){
 
 //        showStackedImages("Passed in", getCenteredImage(referenceSubsampled), getCenteredImage(movingSubsampled));
-        try {
-            Thread.sleep(10000);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }
 
 //        AffineTransform3D subsampledRefOffset = new AffineTransform3D();
 //
@@ -286,12 +310,10 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
         int i = 0;
         Double transformationMagnitudeTarget = 0.1;
         EvictingQueue<Double> lastThreeMagnitudes = EvictingQueue.create(4);
+        boolean halfRotation = false;
 
         //may need to check for a lack of change in transformation magnitude
         while(transformationMagnitude > transformationMagnitudeTarget){
-
-
-
             double[] initialTransformation = subsampledAlignment.getRowPackedCopy();
 
             RealTransformRandomAccessible<? extends RealType, ? extends InvertibleRealTransform> subsampledMovingView = RealViews.transform(interpolatedMoving, subsampledAlignment);
@@ -321,16 +343,26 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
             subsampledMovingView = RealViews.transform(interpolatedMoving, subsampledAlignment);
 //                uiService.show("Centered reference", Views.zeroMin(Views.interval(offsetReferenceView, new FinalInterval(new long[]{-200, -200, -200}, new long[]{200,200,200}))));
 //                uiService.show("Centered moving",Views.zeroMin(Views.interval(currentMovingView, new FinalInterval(new long[]{-200, -200, -200}, new long[]{200,200,200}))));
-
-
 //            showStackedImages("Post translation " + i, getCenteredImage(referenceSubsampled), getCenteredImage(getCurrentWorkingIntervalView(subsampledMovingView, movingSubsampled)));
 
-            subsampledAlignment.preConcatenate(
-                    rotator.findFullImageRotation(
-                            referenceSubsampled,
-                            getCurrentWorkingIntervalView(subsampledMovingView, movingSubsampled)
-                    )
+            AffineTransform3D rotation = rotator.findFullImageRotation(
+                    referenceSubsampled,
+                    getCurrentWorkingIntervalView(subsampledMovingView, movingSubsampled)
             );
+
+            if(halfRotation){
+                AffineTransform3D identity = new AffineTransform3D();
+                identity.identity();
+                double[] rowPackedRotation = rotation.getRowPackedCopy();
+                double[] rowPacedIdentity = identity.getRowPackedCopy();
+                for (int j = 0; j < rowPackedRotation.length; j++) {
+                    rowPackedRotation[j] = (double) ops.env().op("math.mean").input(rowPackedRotation[j], rowPacedIdentity[j]).apply();
+                }
+                rotation.set(rowPackedRotation);
+                halfRotation = false;
+            }
+
+            subsampledAlignment.preConcatenate(rotation);
             subsampledMovingView = RealViews.transform(interpolatedMoving, subsampledAlignment);
 
             transformationMagnitude = getTransformationMagnitude(initialTransformation,subsampledAlignment.getRowPackedCopy());
@@ -338,13 +370,8 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
             lastThreeMagnitudes.add(transformationMagnitude);
 
             if(isCircular(lastThreeMagnitudes)){
-                int randAxis = (int) Math.round(Math.random()*3);
-                double randRotation = Math.random()*(2*Math.PI)-Math.PI;
-                logService.info("Transformations are suspected to be circular, rotating randomly about axis "
-                        + randAxis + " by " +Math.toDegrees(randRotation) + " degrees.");
-                subsampledAlignment.rotate(randAxis,randRotation);
+                halfRotation = true;
             }
-
             if(i > 10){
                 transformationMagnitudeTarget += transformationMagnitude/10;
             }
@@ -451,7 +478,7 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
 
     private RealRandomAccessible extendZeroAndInterpolate(RandomAccessibleInterval input){
         return Views.interpolate(
-                (ExtendedRandomAccessibleInterval)ops.op("transform.extendZeroView").input(input).apply(),
+                (ExtendedRandomAccessibleInterval)ops.env().op("transform.extendZeroView").input(input).apply(),
                 new NLinearInterpolatorFactory()
         );
     }
@@ -468,12 +495,12 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
         RealPoint[] movingCenter = new RealPoint[1];
 
         CompletableFuture<Void> future1 = CompletableFuture.runAsync(() -> {
-            referenceCenter[0] = ((RealPoint) ops.op("geom.centerOfGravity").input(reference).apply());
+            referenceCenter[0] = ((RealPoint) ops.env().op("geom.centerOfGravity").input(reference).apply());
         }, executor);
 
         CompletableFuture<Void> future2 = CompletableFuture.runAsync(() -> {
             // Run second op simultaneously
-            movingCenter[0] = ((RealPoint) ops.op("geom.centerOfGravity").input(moving).apply());
+            movingCenter[0] = ((RealPoint) ops.env().op("geom.centerOfGravity").input(moving).apply());
         }, executor);
 
         CompletableFuture.allOf(future1,future2).join();
@@ -488,213 +515,6 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
         return translationAffine;
     }
 
-//    public class Rotation{
-//
-//        Interval sphericalInterval;
-//        double rotationalScaleFactor;
-//
-//        AffineTransform3D rotate0to2;
-//        AffineTransform3D rotate1to2;
-//
-//        public Rotation(Interval input, double rotationalScaleFactor){
-//
-//            rotate0to2 = new AffineTransform3D();
-//            rotate1to2 = new AffineTransform3D();
-//
-//            rotate0to2.set( 0,0,1,0,
-//                    0,1,0,0,
-//                    -1,0,0,0);
-//
-//            rotate1to2.set( 1,0,0,0,
-//                    0,0,-1,0,
-//                    0,1,0,0);
-//
-//            this.rotationalScaleFactor = rotationalScaleFactor;
-//
-//            double maxDist = 0.0;
-//            long[] dims = input.dimensionsAsLongArray();
-//            for(long dim:dims){
-//                maxDist += Math.pow(dim/2.0, 2);
-//            }
-//            //spherical coordinates are dist, inclination, azimuth
-//            maxDist = Math.round(Math.sqrt(maxDist)*1.1);
-//            maxDist += maxDist%2;
-//            //I think the range here may be off, for the inclination and azimuthal axes
-//            long inclinationRange = getScaledSphericalHalfDim(rotationalScaleFactor);
-//            inclinationRange += inclinationRange%2;
-//            sphericalInterval = new FinalInterval(new long[]{0, 0, -getScaledSphericalHalfDim(rotationalScaleFactor)},new long[]{(long)maxDist, inclinationRange, getScaledSphericalHalfDim(rotationalScaleFactor)});
-//        }
-//
-//        private long getScaledSphericalHalfDim(double scale){
-//            long value = Math.round((Math.PI*scale));
-//            return value;
-//        }
-//
-//
-//        //class for Rotation via flat Sum intensity projection
-//        public AffineTransform3D findFullImageRotation(RandomAccessibleInterval<? extends RealType> reference, RandomAccessibleInterval<? extends RealType> moving){
-//            AffineTransform3D rotation = new AffineTransform3D();
-//            rotation.identity();
-//            HashMap<Integer,Img<FloatType>> axesToSearch = new HashMap<>(reference.numDimensions());
-//
-////            uiService.show("Moving in findFullImageRotation", datasetService.create(ImgView.wrap(moving)));
-//
-//
-////            showStackedImages("FullImageRotationInput", reference, moving);
-//
-//            axesToSearch.put(0, (Img<FloatType>) ops.op("create.img").input(new FinalDimensions(sphericalInterval), new FloatType()).apply());
-//            axesToSearch.put(1, (Img<FloatType>) ops.op("create.img").input(new FinalDimensions(sphericalInterval), new FloatType()).apply());
-//            axesToSearch.put(2, (Img<FloatType>) ops.op("create.img").input(new FinalDimensions(sphericalInterval), new FloatType()).apply());
-//
-//            RealRandomAccessible interpolatedMovingView = extendZeroAndInterpolate(moving);
-//
-//            while (axesToSearch.size()>1){
-//                //This rotates two axes at most before re-translating and starting again.
-//                RealTransformRealRandomAccessible currentView = RealViews.transformReal(interpolatedMovingView, rotation);
-//
-//                AffineTransform3D currentRotation = new AffineTransform3D();
-//                currentRotation.identity();
-//
-//                ValuePair<Integer,Double> toRotate = findHighestRotationCorrelation(reference,getCurrentWorkingIntervalView(currentView, moving), axesToSearch);
-//                logService.info("Rotating image about axis " + toRotate.getA() + " by " + Math.toDegrees(toRotate.getB())+ " degrees.");
-//                axesToSearch.remove(toRotate.getA());
-//                currentRotation.rotate(toRotate.getA(), toRotate.getB());
-//                rotation.preConcatenate(currentRotation);
-//            }
-//
-////            uiService.show("Centered moving in Rotation",Views.zeroMin(Views.interval(RealViews.transform(interpolatedMovingView, rotation), new FinalInterval(new long[]{-200, -200, -200}, new long[]{200,200,200}))));
-////
-////            showStackedImages("FullImageRotationBeforeReturn", reference, getCurrentWorkingIntervalView(RealViews.transformReal(interpolatedMovingView, rotation), moving));
-//            return rotation;
-//        }
-//
-//        public <T extends RealType<T>> ValuePair<Integer, Double> findHighestRotationCorrelation(RandomAccessibleInterval<T> reference, RandomAccessibleInterval<T> moving, HashMap<Integer,Img<FloatType>> toSearch){
-////            uiService.show("Moving in findHighestRotationCorrelation", datasetService.create(ImgView.wrap(moving)));
-//
-//            for (Integer axis: toSearch.keySet()){
-//                RandomAccessibleInterval rotatedReferenceView = null;
-//                RandomAccessibleInterval rotatedMovingView = null;
-//
-//                switch (axis){
-//                    case 0:
-//                        rotatedReferenceView = rotateImage(reference, rotate0to2);
-//                        rotatedMovingView = rotateImage(moving, rotate0to2);
-//                        break;
-//                    case 1:
-//                        rotatedReferenceView = rotateImage(reference, rotate1to2);
-//                        rotatedMovingView = rotateImage(moving, rotate1to2);
-//                        break;
-//                    case 2:
-//                        rotatedReferenceView = reference;
-//                        rotatedMovingView = moving;
-//                        break;
-//                }
-//
-//                setSingleAxisCorrelationImage(toSearch.get(axis), rotatedReferenceView, rotatedMovingView);
-//
-////                uiService.show(axis + "-axis corr", Views.zeroMin(Views.dropSingletonDimensions(Views.hyperSlice(toSearch.get(axis), 0, (toSearch.get(axis).dimension(0)-1)/2))));
-//            }
-//            return findHighestRotationalPointAmong(toSearch);
-//        }
-//
-//        private RandomAccessibleInterval rotateImage(RandomAccessibleInterval input, AffineTransform3D transform){
-//            return getCurrentWorkingIntervalView(
-//                    RealViews.transform(extendZeroAndInterpolate(input), transform),
-//                    input
-//            );
-//        }
-//
-//        private void setSingleAxisCorrelationImage(Img<FloatType> correlationImage, RandomAccessibleInterval<? extends RealType> reference, RandomAccessibleInterval<? extends RealType> moving){
-//            FFTConvolution fftConvolution;
-//            ExecutorService service = Executors.newCachedThreadPool();
-//
-////            uiService.show("Reference spherical", Views.rotate(Views.zeroMin(convertToSphericalCoordinates(reference)), 0, 2));
-////            uiService.show("Moving spherical", Views.rotate(Views.zeroMin(convertToSphericalCoordinates(moving)), 0, 2));
-//
-//            fftConvolution = new FFTConvolution(Views.extendPeriodic(convertToSphericalCoordinates(reference)), correlationImage,Views.extendPeriodic(convertToSphericalCoordinates(moving)), correlationImage, (ImgFactory<ComplexFloatType>) ops.op("create.imgFactory").input(correlationImage, new ComplexFloatType()).apply(), service);
-//            fftConvolution.setComputeComplexConjugate(true);
-//            fftConvolution.setOutput(correlationImage);
-//            fftConvolution.convolve();
-//        }
-//
-//
-//        private ValuePair<Integer, Double> findHighestRotationalPointAmong(HashMap<Integer,Img<FloatType>> toSearch){
-//            //returns dimension and azimuthal angle for rotation
-//            float max = 0.0F;
-//            ValuePair<Integer,Long> maxPoint = new ValuePair<>(-1, -1L);
-//
-//
-//            boolean repeatSearch = true;
-//
-//            while(repeatSearch && !toSearch.isEmpty()) {
-//                max = 0.0F;
-//                maxPoint = new ValuePair<>(-1, -1L);
-//
-//                for (Integer i : toSearch.keySet()) {
-//
-//                    RandomAccessibleInterval<FloatType> rotationalCorrelation =
-//                            Views.hyperSlice(
-//                                    Views.hyperSlice(toSearch.get(i), 0, (toSearch.get(i).dimension(0) - 1) / 2),
-//                                    0, (toSearch.get(i).dimension(1) - 1) / 2);
-//                    Cursor<FloatType> cursor = rotationalCorrelation.localizingCursor();
-//
-//                    while (cursor.hasNext()) {
-//                        if (cursor.next().get() > max) {
-//                            max = cursor.get().get();
-//                            maxPoint = new ValuePair<>(i, cursor.getLongPosition(0));
-//                        }
-//                    }
-//                }
-//
-//                if(maxPoint.getB() == ((toSearch.get(maxPoint.getA()).dimension(2)-1)/2.0) ) {
-//                    //Rotation of 0 result
-//                    toSearch.remove(maxPoint.getA());
-//                }
-//                else{
-//                    repeatSearch = false;
-//                }
-//            }
-//            if(maxPoint.getA() == -1 || toSearch.isEmpty()){
-//                return new ValuePair<>(0,0.0);
-//            }
-//
-//            double fractionalAngle = (maxPoint.getB() - ((toSearch.get(maxPoint.getA()).dimension(2)-1)/2.0))/(toSearch.get(maxPoint.getA()).dimension(2)-1);
-//
-//            return new ValuePair<>(maxPoint.getA(), 2*Math.PI*fractionalAngle);
-//        }
-//
-//        private RandomAccessibleInterval convertToSphericalCoordinates(RandomAccessibleInterval input){
-//
-//            RealTransformRealRandomAccessible sphericalInput = RealViews.transform(
-//                    RealViews.transformReal(extendZeroAndInterpolate(input), SphericalToCartesianTransform3D.getInstance().inverse()),
-//                    new Scale3D(1, rotationalScaleFactor, rotationalScaleFactor)
-//            );
-//
-//            return Views.interval(
-//                    Views.raster(
-//                            sphericalInput
-//                    ),
-//                    sphericalInterval
-//            );
-//        }
-//
-////        private RandomAccessibleInterval convertToLogPolarCoordinates(RandomAccessibleInterval input, Interval region){
-////            ScaledPolarToTranslatedCartesianTransform2D polarTransform = new ScaledPolarToTranslatedCartesianTransform2D(0, 0, 1, 360/(2*Math.PI));
-////
-////            //todo: Need to do log polar transform?
-////            RealTransformRealRandomAccessible polarInput = RealViews.transformReal(extendZeroAndInterpolate(input), polarTransform.inverse());
-////
-////
-////
-////            return Views.interval(
-////                    Views.raster(
-////                            polarInput
-////                    ),
-////                    polarInterval
-////            );
-////        }
-//
-//    }
 
     public class Rotation2D {
 
@@ -727,32 +547,23 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
             //spherical coordinates are dist, inclination, azimuth
             maxDist = Math.round(Math.sqrt(maxDist) * 1.1);
             maxDist += maxDist % 2;
-            //I think the range here may be off, for the inclination and azimuthal axes
-            long inclinationRange = getScaledSphericalHalfDim(rotationalScaleFactor);
+
+            long inclinationRange = (long)Math.floor(Math.PI*rotationalScaleFactor);
             inclinationRange += inclinationRange % 2;
-            sphericalInterval = new FinalInterval(new long[]{0, 0, -getScaledSphericalHalfDim(rotationalScaleFactor)}, new long[]{(long) maxDist, inclinationRange, getScaledSphericalHalfDim(rotationalScaleFactor)});
+            sphericalInterval = new FinalInterval(new long[]{0, 0, -(long)Math.ceil(Math.PI*rotationalScaleFactor)}, new long[]{(long) maxDist, inclinationRange, (long)Math.floor(Math.PI*rotationalScaleFactor)});
         }
 
-        private long getScaledSphericalHalfDim(double scale) {
-            long value = Math.round((Math.PI * scale));
-            return value;
-        }
-
-
-        //class for Rotation via flat Sum intensity projection
         public AffineTransform3D findFullImageRotation(RandomAccessibleInterval<T> reference, RandomAccessibleInterval<? extends RealType> moving) {
             HashMap<Integer, Img<FloatType>> axesToSearch = new HashMap<>(reference.numDimensions());
 
             AffineTransform3D currentRotation = new AffineTransform3D();
             currentRotation.identity();
 //            uiService.show("Moving in findFullImageRotation", datasetService.create(ImgView.wrap(moving)));
-
-
 //            showStackedImages("FullImageRotationInput", reference, moving);
 
-            axesToSearch.put(0, (Img<FloatType>) ops.op("create.img").input(new FinalDimensions(sphericalInterval), new FloatType()).apply());
-            axesToSearch.put(1, (Img<FloatType>) ops.op("create.img").input(new FinalDimensions(sphericalInterval), new FloatType()).apply());
-            axesToSearch.put(2, (Img<FloatType>) ops.op("create.img").input(new FinalDimensions(sphericalInterval), new FloatType()).apply());
+            axesToSearch.put(0, (Img<FloatType>) ops.env().op("create.img").input(new FinalDimensions(sphericalInterval), new FloatType()).apply());
+            axesToSearch.put(1, (Img<FloatType>) ops.env().op("create.img").input(new FinalDimensions(sphericalInterval), new FloatType()).apply());
+            axesToSearch.put(2, (Img<FloatType>) ops.env().op("create.img").input(new FinalDimensions(sphericalInterval), new FloatType()).apply());
 
             RealRandomAccessible interpolatedMovingView = extendZeroAndInterpolate(moving);
 
@@ -885,13 +696,13 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
         }
 
         private float getDirectCorrelation(RandomAccessibleInterval<T> reference, RandomAccessibleInterval<T> moving){
-            //Img<FloatType> multiplied = (Img<FloatType>)ops.op("create.img").input(reference, new FloatType()).apply();
+            //Img<FloatType> multiplied = (Img<FloatType>)ops.env().op("create.img").input(reference, new FloatType()).apply();
             //SciJava ops "math.mul" doesn't work here.
-            //ops.op("math.mul").input(reference, Views.interval(Views.extendZero(moving), reference)).output(multiplied).compute();
+            //ops.env().op("math.mul").input(reference, Views.interval(Views.extendZero(moving), reference)).output(multiplied).compute();
 
             IterableInterval multiplied = ijOps.math().multiply(reference,Views.interval(Views.extendZero(moving), reference));
 
-            DoubleType result = (DoubleType) ops.op("stats.sum").input(multiplied).apply();
+            DoubleType result = (DoubleType) ops.env().op("stats.sum").input(multiplied).apply();
 
             return result.getRealFloat();
         }
@@ -910,7 +721,29 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
 //            uiService.show("Reference spherical", Views.rotate(Views.zeroMin(convertToSphericalCoordinates(reference)), 0, 2));
 //            uiService.show("Moving spherical", Views.rotate(Views.zeroMin(convertToSphericalCoordinates(moving)), 0, 2));
 
-            fftConvolution = new FFTConvolution(Views.extendPeriodic(convertToSphericalCoordinates(reference)), correlationImage, Views.extendPeriodic(convertToSphericalCoordinates(moving)), correlationImage, (ImgFactory<ComplexFloatType>) ops.op("create.imgFactory").input(correlationImage, new ComplexFloatType()).apply(), service);
+
+            //todo: finish and remove
+//            RandomAccessibleInterval refSpherical = convertToSphericalCoordinates(reference);
+//            RandomAccessibleInterval movSpherical = convertToSphericalCoordinates(moving);
+//            long[] min = refSpherical.minAsLongArray();
+//            long[] max = refSpherical.maxAsLongArray();
+//
+//            for (int i = 0; i < min.length; i++) {
+//                min[i] = min[i] - 10;
+//                max[i] = max[i] + 10;
+//            }
+//
+//            showStackedImages("Original", refSpherical,movSpherical);
+//            showStackedImages("Spherical images",
+//                    Views.interval(new ExtendedRandomAccessibleInterval(convertToSphericalCoordinates(reference), new OutOfBoundsSpherical3DFactory<>()), new FinalInterval(min, max)),
+//                    Views.interval(new ExtendedRandomAccessibleInterval(convertToSphericalCoordinates(moving), new OutOfBoundsSpherical3DFactory<>()), new FinalInterval(min, max)));
+//            try {
+//                Thread.sleep(1000000);
+//            } catch (InterruptedException e) {
+//                throw new RuntimeException(e);
+//            }
+
+            fftConvolution = new FFTConvolution(new ExtendedRandomAccessibleInterval(convertToSphericalCoordinates(reference), new OutOfBoundsSpherical3DFactory<>()), correlationImage, new ExtendedRandomAccessibleInterval(convertToSphericalCoordinates(moving), new OutOfBoundsSpherical3DFactory<>()), correlationImage, (ImgFactory<ComplexFloatType>) ops.env().op("create.imgFactory").input(correlationImage, new ComplexFloatType()).apply(), service);
             fftConvolution.setComputeComplexConjugate(true);
             fftConvolution.setOutput(correlationImage);
             fftConvolution.convolve();
@@ -922,8 +755,8 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
             boolean repeatSearch = true;
             float max;
             MutableTriple<Integer, Long, Long> maxPoint = new MutableTriple<>(-1, -1L, -1L);
-            double fractionalIncline = 0.0;
-            double fractionalAzimuth = 0.0;
+            double inclineRadians = 0.0;
+            double azimuthRadians = 0.0;
 
             while(repeatSearch && !toSearch.isEmpty()) {
                 max = 0.0F;
@@ -933,6 +766,7 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
 
                     RandomAccessibleInterval<FloatType> rotationalCorrelation =
                             Views.hyperSlice(toSearch.get(i), 0, (toSearch.get(i).dimension(0) - 1) / 2);
+
                     Cursor<FloatType> cursor = rotationalCorrelation.localizingCursor();
 
                     while (cursor.hasNext()) {
@@ -943,9 +777,17 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
                     }
                 }
 
-                fractionalIncline = (maxPoint.getMiddle() - ((toSearch.get(maxPoint.getLeft()).dimension(1) - 1) / 2.0)) / (toSearch.get(maxPoint.getLeft()).dimension(1) - 1);
-                fractionalAzimuth = (maxPoint.getRight() - ((toSearch.get(maxPoint.getLeft()).dimension(2) - 1) / 2.0)) / (toSearch.get(maxPoint.getLeft()).dimension(2) - 1);
-                if (fractionalIncline < Double.MIN_VALUE && fractionalAzimuth < Double.MIN_VALUE){
+                /*
+                Left: Axis perspective
+                Middle: Incline position
+                Right: Azimithual position
+                 */
+
+                //todo: Replace these with non fractional method, should involve the rotational scale factor
+                inclineRadians = (maxPoint.getMiddle() - ((toSearch.get(maxPoint.getLeft()).dimension(1) - 1) / 2.0)) * (1/rotationalScaleFactor);
+                azimuthRadians = (maxPoint.getRight() - ((toSearch.get(maxPoint.getLeft()).dimension(2) - 1) / 2.0)) * (1/rotationalScaleFactor);
+
+                if (inclineRadians < Double.MIN_VALUE && azimuthRadians < Double.MIN_VALUE){
                     //Check if max correlation is at zero-rotation, and repeat search if so.
                     toSearch.remove(maxPoint.getLeft());
                     repeatSearch = true;
@@ -959,11 +801,10 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
             }
 
             logService.info("Brightest point in Rotational Correlation images, from perspective of axis " + maxPoint.getLeft() +
-                    ":\n\tInclination: " + Math.toDegrees(Math.PI * fractionalIncline) + "\n\tAzimuth: " + Math.toDegrees(2 * Math.PI * fractionalAzimuth));
+                    ":\n\tInclination: " + Math.toDegrees(inclineRadians) + "\n\tAzimuth: " + Math.toDegrees(azimuthRadians));
 
-            return new MutableTriple<>(maxPoint.getLeft(), Math.PI * fractionalIncline, 2 * Math.PI * fractionalAzimuth);
+            return new MutableTriple<>(maxPoint.getLeft(), inclineRadians, azimuthRadians);
         }
-
 
 
         private RandomAccessibleInterval convertToSphericalCoordinates(RandomAccessibleInterval input) {
@@ -1026,9 +867,9 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
     public class CorrelationFunctions {
 
 //        public RandomAccessibleInterval<FloatType> correlate(RandomAccessibleInterval input, RandomAccessibleInterval kernel){
-//            Interval bounds = new FinalInterval(greatestDimensions(input, kernel));
+//            Interval bounds = new FinalInterval(greatestOddDimensions(input, kernel));
 //
-//            return (RandomAccessibleInterval<FloatType>) ops.op("filter.correlate").input(
+//            return (RandomAccessibleInterval<FloatType>) ops.env().op("filter.correlate").input(
 //                    expandImage(input, bounds),
 //                    expandImage(kernel, bounds),
 //                    new FloatType(),
@@ -1044,11 +885,11 @@ public class Batch_3D_Registration <T extends RealType<T>, R extends InvertibleR
             ExecutorService service = Executors.newCachedThreadPool();
             Dimensions dims = greatestOddDimensions(input, kernel);
 
-            Img<FloatType> crossCorrelation = (Img<FloatType>) ops.op("create.img").input(dims, new FloatType()).apply();
+            Img<FloatType> crossCorrelation = (Img<FloatType>) ops.env().op("create.img").input(dims, new FloatType()).apply();
 
             Interval bounds = new FinalInterval(crossCorrelation);
 
-            fftConvolution = new FFTConvolution(Views.extendZero(input), bounds,Views.extendZero(kernel), bounds, (ImgFactory<ComplexFloatType>) ops.op("create.imgFactory").input(bounds, new ComplexFloatType()).apply(), service);
+            fftConvolution = new FFTConvolution(Views.extendZero(input), bounds,Views.extendZero(kernel), bounds, (ImgFactory<ComplexFloatType>) ops.env().op("create.imgFactory").input(bounds, new ComplexFloatType()).apply(), service);
             fftConvolution.setComputeComplexConjugate(true);
             fftConvolution.setOutput(crossCorrelation);
             fftConvolution.convolve();
