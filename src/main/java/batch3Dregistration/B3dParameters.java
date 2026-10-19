@@ -43,7 +43,7 @@ public class B3dParameters {
                 this.setParameters(interval, 200000, 5.0, false);
                 break;
             case Moderate:
-                this.setParameters(interval, 350000, 3.0, false);
+                this.setParameters(interval, 350000, 3.0, true);
                 break;
             case Normal:
                 this.setParameters(interval, 500000, 2.0, true);

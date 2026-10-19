@@ -13,7 +13,7 @@
 
     <groupId>net.andmccall</groupId>
     <artifactId>Batch_3D_Registration</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <version>0.4.0-SNAPSHOT</version>
 
     <name>Batch 3D Registration</name>
     <description>SciJava plugin for fully automatic batched registration of 3D images</description>

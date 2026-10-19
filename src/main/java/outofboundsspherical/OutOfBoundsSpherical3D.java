@@ -34,11 +34,7 @@
 
 package outofboundsspherical;
 
-import net.imglib2.AbstractLocalizable;
-import net.imglib2.Interval;
-import net.imglib2.Localizable;
-import net.imglib2.RandomAccess;
-import net.imglib2.RandomAccessible;
+import net.imglib2.*;
 import net.imglib2.outofbounds.OutOfBounds;
 import net.imglib2.util.Util;
 
@@ -89,7 +85,7 @@ import net.imglib2.util.Util;
  *
  * @param <T>
  *
- * @author Stephan Saalfeld (original periodic implementation)
+ * @author Andrew McCall
  */
 public class OutOfBoundsSpherical3D< T > extends AbstractLocalizable implements OutOfBounds< T >
 {
