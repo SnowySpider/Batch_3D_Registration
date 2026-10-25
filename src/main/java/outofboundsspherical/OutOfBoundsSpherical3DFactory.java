@@ -37,6 +37,7 @@ package outofboundsspherical;
 import net.imglib2.Interval;
 import net.imglib2.RandomAccessible;
 import net.imglib2.outofbounds.OutOfBoundsFactory;
+import net.imglib2.type.Type;
 
 /**
  * Factory for {@link OutOfBoundsSpherical3D}, for use with
@@ -45,42 +46,52 @@ import net.imglib2.outofbounds.OutOfBoundsFactory;
  * @param <T>
  * @param <F>
  */
-public class OutOfBoundsSpherical3DFactory< T, F extends Interval & RandomAccessible< T > >
+public class OutOfBoundsSpherical3DFactory< T extends Type<T>, F extends Interval & RandomAccessible< T > >
         implements OutOfBoundsFactory< T, F >
 {
-    private final int rDim;
+    protected T value;
 
-    private final int thetaDim;
+    protected final int rDim;
 
-    private final int phiDim;
+    protected final int thetaDim;
 
-    private final boolean skipBoundary;
+    protected final int phiDim;
 
-    private final boolean radiusStartsAtOrigin;
+    protected final boolean skipBoundary;
 
     /** Default layout: (r, theta, phi) = (0, 1, 2), skip boundary, radius from origin. */
-    public OutOfBoundsSpherical3DFactory()
+    public OutOfBoundsSpherical3DFactory(final T value )
     {
-        this( 0, 1, 2, true, true );
+        this( value, 0, 1, 2, true );
     }
 
     public OutOfBoundsSpherical3DFactory(
+            T value,
             final int rDim,
             final int thetaDim,
             final int phiDim,
-            final boolean skipBoundary,
-            final boolean radiusStartsAtOrigin )
+            final boolean skipBoundary)
     {
+        this.value = value;
         this.rDim = rDim;
         this.thetaDim = thetaDim;
         this.phiDim = phiDim;
         this.skipBoundary = skipBoundary;
-        this.radiusStartsAtOrigin = radiusStartsAtOrigin;
+    }
+
+    public void setValue( final T value )
+    {
+        this.value = value;
+    }
+
+    public T getValue()
+    {
+        return value;
     }
 
     @Override
     public OutOfBoundsSpherical3D< T > create( final F f )
     {
-        return new OutOfBoundsSpherical3D< T >( f, rDim, thetaDim, phiDim, skipBoundary, radiusStartsAtOrigin );
+        return new OutOfBoundsSpherical3D< T >( f, value, rDim, thetaDim, phiDim, skipBoundary );
     }
 }

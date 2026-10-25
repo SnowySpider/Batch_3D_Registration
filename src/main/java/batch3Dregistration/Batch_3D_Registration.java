@@ -37,6 +37,7 @@ import net.imglib2.img.ImgFactory;
 import net.imglib2.img.ImgView;
 import net.imglib2.interpolation.randomaccess.NLinearInterpolatorFactory;
 import net.imglib2.loops.LoopBuilder;
+import net.imglib2.outofbounds.OutOfBoundsConstantValueFactory;
 import net.imglib2.realtransform.*;
 import net.imglib2.realtransform.interval.IntervalSamplingMethod;
 import net.imglib2.type.logic.BitType;
@@ -261,6 +262,7 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
 
             //reset reference image, in case it was modified by the mask
             Img<FloatType> currentReference = getWorkingImg(referenceImage);
+//            refMean = (float)0.0;
             refMean = ijOps.stats().mean(currentReference).getRealFloat();
             currentReference.cursor().forEachRemaining((pixel) ->{pixel.setReal(pixel.getRealDouble()-refMean);});
             offsetReferenceView = RealViews.transform(extendConstAndInterpolate(currentReference, refMean), originOffset);
@@ -271,6 +273,7 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
             Img<FloatType> movingImage = getWorkingImg(originalMovingImage);
             //Set up the running combined transform
             AffineTransform3D currentTransform = centerOfGravityToOrigin(movingImage);
+//            moveMean = (float)0.0;
             moveMean = ijOps.stats().mean(movingImage).getRealFloat();
             movingImage.cursor().forEachRemaining((pixel) ->{pixel.setReal(pixel.getRealDouble()-moveMean);});
 
@@ -803,6 +806,15 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
             //SciJava ops "math.mul" doesn't work here.
             //ops.env().op("math.mul").input(reference, Views.interval(Views.extendZero(moving), reference)).output(multiplied).compute();
 
+
+//            RandomAccessibleInterval<FloatType> tempref = (RandomAccessibleInterval<FloatType>) ops.env().op("copy.rai").input(reference).apply();
+//            RandomAccessibleInterval<FloatType> tempmoving = (RandomAccessibleInterval<FloatType>) ops.env().op("copy.rai").input(moving).apply();
+//            final float tempRefmean = ijOps.stats().mean(reference).getRealFloat();
+//            LoopBuilder.setImages(tempref).forEachPixel((pixel)-> {pixel.setReal(pixel.get()- tempRefmean);});
+//
+//            final float tempMovemean = ijOps.stats().mean(moving).getRealFloat();
+//            LoopBuilder.setImages(tempmoving).forEachPixel((pixel)-> {pixel.setReal(pixel.get()- tempMovemean);});
+
             IterableInterval multiplied = ijOps.math().multiply(reference,Views.interval(Views.extendZero(moving), reference));
 
             DoubleType result = (DoubleType) ops.env().op("stats.sum").input(multiplied).apply();
@@ -825,9 +837,9 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
 //            uiService.show("Moving spherical", Views.rotate(Views.zeroMin(convertToSphericalCoordinates(moving)), 0, 2));
 
             fftConvolution = new FFTConvolution(
-                    new ExtendedRandomAccessibleInterval(convertToSphericalCoordinates(reference, refMean), new OutOfBoundsSpherical3DFactory<>()),
+                    new ExtendedRandomAccessibleInterval(convertToSphericalCoordinates(reference, refMean), new OutOfBoundsSpherical3DFactory<>(new FloatType(refMean))),
                     correlationImage,
-                    new ExtendedRandomAccessibleInterval(convertToSphericalCoordinates(moving, moveMean), new OutOfBoundsSpherical3DFactory<>()),
+                    new ExtendedRandomAccessibleInterval(convertToSphericalCoordinates(moving, moveMean), new OutOfBoundsSpherical3DFactory<>(new FloatType(moveMean))),
                     correlationImage,
                     (ImgFactory<ComplexFloatType>) ops.env().op("create.imgFactory").input(correlationImage, new ComplexFloatType()).apply(),
                     service);
@@ -856,6 +868,10 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
                 }
                 inclineRadians = (maxPoint.getMiddle() - ((toSearch.get(maxPoint.getLeft()).dimension(1) - 1) / 2.0)) * (1/rotationalScaleFactor);
                 azimuthRadians = (maxPoint.getRight() - ((toSearch.get(maxPoint.getLeft()).dimension(2) - 1) / 2.0)) * (1/rotationalScaleFactor);
+
+                if(i == 0){
+                    azimuthRadians = -azimuthRadians;
+                }
 
                 maxCorrelations.put(max, new MutableTriple<>(i, inclineRadians, azimuthRadians));
             }
