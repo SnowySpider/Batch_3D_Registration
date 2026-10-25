@@ -206,8 +206,8 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
             case VeryLow:
                 resolutionList.addFirst(new B3dParameters(workingReference, B3dParameters.Resolutions.VeryLow));
         }
-        resolutionList.addFirst(new B3dParameters(workingReference, 75000, 15.0, false));
-        resolutionList.addFirst(new B3dParameters(workingReference, 50000, 30.0, false));
+//        resolutionList.addFirst(new B3dParameters(workingReference, 75000, 15.0, false));
+//        resolutionList.addFirst(new B3dParameters(workingReference, 50000, 30.0, false));
     }
 
     protected Img<FloatType> getWorkingImg(Dataset input){
@@ -323,7 +323,6 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
             }
 
 
-            //todo: AffineTransform 3D is currently transforming Channels as the third axis. Need to switch it to Z
             Dataset output = datasetService.create(
                 ImgPlus.wrap(
                     finalMovingTransform(originalMovingImage, currentTransform, referenceImage),
@@ -644,6 +643,10 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
 //            uiService.show("Moving in findFullImageRotation", datasetService.create(ImgView.wrap(moving)));
 //            showStackedImages("FullImageRotationInput", reference, moving);
 
+//            long[] min = sphericalInterval.minAsLongArray();
+//            long[] max = sphericalInterval.maxAsLongArray();
+//            min[1] = -max[1];
+//            FinalInterval expanded = new FinalInterval(min, max);
 
             axesToSearch.put(0, (Img<FloatType>) ops.env().op("create.img").input(new FinalDimensions(sphericalInterval), new FloatType()).apply());
             axesToSearch.put(1, (Img<FloatType>) ops.env().op("create.img").input(new FinalDimensions(sphericalInterval), new FloatType()).apply());
@@ -699,7 +702,7 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
         }
 
 
-        /**
+        /*
          * There are a few variables pertaining to the inclination value from the rotational cross-correlation result in
          * terms of the resulting correct rotation.
          *  1. Inclination does not tell us which of the other two non-azimuthal axes to rotate. In truth, it could be
@@ -713,11 +716,6 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
          *
          * Each of the above parameters has two possiblities that we must test, for a total of 8 possible unique combinations.
          * This method tests each of them for which generates the highest correlation.
-         *
-         * @param reference
-         * @param moving
-         * @param rotations
-         * @return The optimal combination of each of the above parameters as an ordered List of type <dimension, angle>
          */
         public List<ValuePair<Integer,Double>> getOptimalRotationOrder(RandomAccessibleInterval<FloatType> reference, RealTransformRealRandomAccessible<FloatType, AffineTransform3D> moving, MutableTriple<Integer, Double, Double> rotations){
 
@@ -819,13 +817,12 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
             );
         }
 
-        private void setSingleAxisCorrelationImage(Img<FloatType> correlationImage, RandomAccessibleInterval<? extends RealType> reference, RandomAccessibleInterval<? extends RealType> moving) {
+        private void setSingleAxisCorrelationImage(Img<FloatType> correlationImage, RandomAccessibleInterval<FloatType> reference, RandomAccessibleInterval<FloatType> moving) {
             FFTConvolution fftConvolution;
             ExecutorService service = Executors.newCachedThreadPool();
 
 //            uiService.show("Reference spherical", Views.rotate(Views.zeroMin(convertToSphericalCoordinates(reference)), 0, 2));
 //            uiService.show("Moving spherical", Views.rotate(Views.zeroMin(convertToSphericalCoordinates(moving)), 0, 2));
-
 
             fftConvolution = new FFTConvolution(
                     new ExtendedRandomAccessibleInterval(convertToSphericalCoordinates(reference, refMean), new OutOfBoundsSpherical3DFactory<>()),
@@ -889,20 +886,80 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
         }
 
 
-        private RandomAccessibleInterval convertToSphericalCoordinates(RandomAccessibleInterval input, double mean) {
+        private Img<FloatType> convertToSphericalCoordinates(RandomAccessibleInterval<FloatType> input, double mean) {
 
             RealTransformRealRandomAccessible sphericalInput = RealViews.transform(
                     RealViews.transformReal(extendConstAndInterpolate(input, mean), SphericalToCartesianTransform3D.getInstance().inverse()),
                     new Scale3D(1, rotationalScaleFactor, rotationalScaleFactor)
             );
 
-            return Views.interval(
-                    Views.raster(
-                            sphericalInput
-                    ),
-                    sphericalInterval
-            );
+            RandomAccessibleInterval<FloatType> sphericalRAI =
+                    Views.interval(
+                        Views.raster(
+                                sphericalInput
+                        ),
+                        sphericalInterval
+                    );
+            Img<FloatType> returnImg = (Img<FloatType>) ops.env().op("create.img").input(sphericalInterval, new FloatType()).apply();
+
+            LoopBuilder.setImages(returnImg, sphericalRAI).forEachPixel((r,s) ->{
+                r.setReal(s.getRealFloat());
+            });
+
+            compensateForPoleRepeat(returnImg);
+
+//            long[] min = sphericalInterval.minAsLongArray();
+//            long[] max = sphericalInterval.maxAsLongArray();
+//            min[1] = -max[1];
+//            FinalInterval expanded = new FinalInterval(min, max);
+//            uiService.show(
+
+//            );
+
+            return returnImg;
         }
+    }
+
+    /*
+     * For spherical coordinate transform data, the Intensity values along the Pole axis (inclination 0 and 180), are
+     * repeated across all azimuthal values. During crossc-correlation of this spherical coordinate data this has the
+     * effect of enhancing the correlation for no inclination change, particularly if the polar axis happens to have a few
+     * data points in alignment, even if the registration is actually off. There are a few options to correct for this
+     * issue, though each has its own drawbacks:
+     *  1. Instead of using spherical coordinates, we could switch to using cylindrical coordinates. This entirely
+     *  removes the pole issue, and there would be no repeated data. However, this means that we'll only get a single
+     *  rotational axis for cross-correlation, potentially increasing the likelihood of getting stuck in local minima.
+     *  Additionally, the "scale" axis for cylindrical coordinate data isn't a global scale, but just around that axis.
+     *  This could cause issues if we want to add scaling registration in the future.
+     *
+     *  2. We could not include the poles in the spherical coordinate data. This would remove the issue, but could be very
+     *  challenging to implement, particularly if we allow custom values from users, and would probably require a new
+     * OutOfBounds factory, as the "OutOfBoundsSpherical3D" implementation expects the poles to be included.
+     *
+     *  3. We can simply change the intensity of the data at the poles to compensate for the repeats across the azimuthal
+     *  axis. This is one of the simplest method to implement, correcting for the increased correlation along the azimuthal axis,
+     *  though it does still mean that the repeats will be evaluated across the entire azimuthal axis for any inclination
+     *  rotations during cross-correlation, though the intensity from this contribution would be reduced. Still, due to
+     *  its simplicity this is the method I first attempted.
+     *
+     *  4. We could change the intensity at the poles to 0. This way the poles would simply not contribute to the cross
+     *  correlation result at all.
+     */
+    private void compensateForPoleRepeat(RandomAccessibleInterval<FloatType> input){
+        final long inclinationSize = input.dimension(1);
+        final float correctionFactor = input.dimension(2);
+
+        Views.hyperSlice(input, 1, 0).cursor().forEachRemaining((pixel) ->{
+            if(pixel.getRealFloat() > 0.0) {
+                pixel.setReal(pixel.getRealFloat() / correctionFactor);
+            }
+        });
+
+        Views.hyperSlice(input, 1, inclinationSize-1).cursor().forEachRemaining((pixel) ->{
+            if(pixel.getRealFloat() > 0.0) {
+                pixel.setReal(pixel.getRealFloat() / correctionFactor);
+            }
+        });
     }
 
     public class CorrelationTranslation {
