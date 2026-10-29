@@ -31,15 +31,21 @@ import net.imagej.ImgPlus;
 import net.imagej.axis.Axes;
 import net.imagej.ops.OpService;
 import net.imglib2.*;
+import net.imglib2.RandomAccess;
 import net.imglib2.algorithm.fft2.FFTConvolution;
+import net.imglib2.converter.Converter;
+import net.imglib2.converter.Converters;
 import net.imglib2.img.Img;
 import net.imglib2.img.ImgFactory;
 import net.imglib2.img.ImgView;
 import net.imglib2.interpolation.randomaccess.NLinearInterpolatorFactory;
 import net.imglib2.loops.LoopBuilder;
-import net.imglib2.outofbounds.OutOfBoundsConstantValueFactory;
 import net.imglib2.realtransform.*;
 import net.imglib2.realtransform.interval.IntervalSamplingMethod;
+import net.imglib2.roi.*;
+import net.imglib2.roi.labeling.ImgLabeling;
+import net.imglib2.roi.labeling.LabelRegion;
+import net.imglib2.roi.labeling.LabelRegions;
 import net.imglib2.type.logic.BitType;
 import net.imglib2.type.numeric.RealType;
 import net.imglib2.type.numeric.complex.ComplexFloatType;
@@ -121,8 +127,9 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
 
     protected SCIFIOConfig config;
 
-//    protected Interval workingInterval;
-    protected Dataset referenceImage;
+    protected Dataset origReferenceImage;
+    protected RandomAccessibleInterval<FloatType> referenceImage;
+    protected Converter floatMinusMean;
     protected Img<BitType> referenceMask;
     protected boolean maskApplied;
     protected CorrelationTranslation translator;
@@ -130,8 +137,7 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
     protected AffineTransform3D originOffset;
     protected RealTransformRandomAccessible offsetReferenceView;
     protected LinkedList<B3dParameters> resolutionList;
-    protected float refMean;
-    protected float moveMean;
+    protected float mean;
 
     protected void errorChecking(Dataset testImage){
         if(testImage.dimensionIndex(Axes.TIME) > 1){
@@ -144,12 +150,13 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
             throw new RuntimeException(new IOException("Cannot open reference file as image."));
         }
         logService.info("Opening reference image file: " + referenceFile.getPath());
+
         try {
-            referenceImage = datasetIOService.open(referenceFile.getPath());
+            origReferenceImage = datasetIOService.open(referenceFile.getPath());
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
-        errorChecking(referenceImage);
+        errorChecking(origReferenceImage);
 
         if(maskFile == null || maskFile.getPath().isEmpty()){
             referenceMask = null;
@@ -168,8 +175,8 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
             if(referenceMask.numDimensions() != 3){
                 throw new RuntimeException(new IOException("Reference mask must have exactly 3 dimensions."));
             }
-            if (referenceImage.size() != referenceMask.size()){
-                throw new RuntimeException(new IOException("Reference mask dimensions do not match reference imge."));
+            if (origReferenceImage.size() != referenceMask.size()){
+                throw new RuntimeException(new IOException("Reference mask dimensions do not match reference image."));
             }
             maskApplied = false;
         }
@@ -183,47 +190,52 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
 
         translator = new CorrelationTranslation();
 
-        //Change this to just remove the Ch dimension of the interval, faster
-        Img<FloatType> workingReference = getWorkingImg(referenceImage);
+        RandomAccessibleInterval<? extends RealType> tempRef = getWorkingRAI(origReferenceImage);
+        mean = ijOps.stats().mean(tempRef).getRealFloat();
+        floatMinusMean = (Converter<RealType, FloatType>) (input, output) -> output.setReal(input.getRealFloat() - mean);
+        referenceImage = Converters.convert(tempRef, floatMinusMean, new FloatType());
 
         logService.info("Moving reference image center to origin");
-        originOffset = centerOfGravityToOrigin(workingReference);
+        originOffset = centerOfGravityToOrigin(tempRef);
+
         resolutionList = new LinkedList<>();
 
         switch (resolutionChoice){
             case Native:
-                resolutionList.addFirst(new B3dParameters(workingReference, B3dParameters.Resolutions.Native));
+                resolutionList.addFirst(new B3dParameters(referenceImage, B3dParameters.Resolutions.Native));
+                break;
             case VeryHigh:
-                resolutionList.addFirst(new B3dParameters(workingReference, B3dParameters.Resolutions.VeryHigh));
+                resolutionList.addFirst(new B3dParameters(referenceImage, B3dParameters.Resolutions.VeryHigh));
+                break;
             case High:
-                resolutionList.addFirst(new B3dParameters(workingReference, B3dParameters.Resolutions.High));
+                resolutionList.addFirst(new B3dParameters(referenceImage, B3dParameters.Resolutions.High));
+                break;
             case Normal:
             default:
-                resolutionList.addFirst(new B3dParameters(workingReference, B3dParameters.Resolutions.Normal));
+                resolutionList.addFirst(new B3dParameters(referenceImage, B3dParameters.Resolutions.Normal));
+                break;
             case Moderate:
-                resolutionList.addFirst(new B3dParameters(workingReference, B3dParameters.Resolutions.Moderate));
+                resolutionList.addFirst(new B3dParameters(referenceImage, B3dParameters.Resolutions.Moderate));
             case Low:
-                resolutionList.addFirst(new B3dParameters(workingReference, B3dParameters.Resolutions.Low));
             case VeryLow:
-                resolutionList.addFirst(new B3dParameters(workingReference, B3dParameters.Resolutions.VeryLow));
         }
-//        resolutionList.addFirst(new B3dParameters(workingReference, 75000, 15.0, false));
-//        resolutionList.addFirst(new B3dParameters(workingReference, 50000, 30.0, false));
+        if(resolutionChoice != B3dParameters.Resolutions.VeryLow)
+            resolutionList.addFirst(new B3dParameters(referenceImage, B3dParameters.Resolutions.Low));
+        resolutionList.addFirst(new B3dParameters(referenceImage, B3dParameters.Resolutions.VeryLow));
+        resolutionList.addFirst(new B3dParameters(referenceImage, 75000, 15.0, false));
+        resolutionList.addFirst(new B3dParameters(referenceImage, 50000, 30.0, false));
     }
 
-    protected Img<FloatType> getWorkingImg(Dataset input){
-        Img<FloatType> returnImg = (Img<FloatType>) ops.env().op("convert.float32").input(input).apply();
+    protected RandomAccessibleInterval<? extends RealType> getWorkingRAI(Dataset input){
+        RandomAccessibleInterval<? extends RealType> returnRAI = input;
 
-        applyThreshold(returnImg,thresholdValue);
-
+        applyThreshold(returnRAI,thresholdValue);
         int chIndex = input.dimensionIndex(Axes.CHANNEL);
 
         if(input.dimension(chIndex) > 1){
-            returnImg = (Img<FloatType>)ImgView.wrap(
-                    Views.dropSingletonDimensions(
-                            (RandomAccessibleInterval)ops.env().op("transform.hyperSliceView")
-                        .input(returnImg, chIndex, correlationChannel).apply()
-                    )
+            returnRAI = Views.dropSingletonDimensions(
+                (RandomAccessibleInterval)ops.env().op("transform.hyperSliceView")
+                .input(returnRAI, chIndex, correlationChannel).apply()
             );
         }
 
@@ -231,13 +243,12 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
             maskApplied = false;
         }
 
-        return returnImg;
+        return returnRAI;
     }
 
     @Override
     public void run(){
         logService.info("Starting Batch 3D Registration plugin");
-
 
         logService.info("Initializing plugin");
         try {
@@ -260,41 +271,32 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
             }
             errorChecking(originalMovingImage);
 
-            //reset reference image, in case it was modified by the mask
-            Img<FloatType> currentReference = getWorkingImg(referenceImage);
-//            refMean = (float)0.0;
-            refMean = ijOps.stats().mean(currentReference).getRealFloat();
-            currentReference.cursor().forEachRemaining((pixel) ->{pixel.setReal(pixel.getRealDouble()-refMean);});
-            offsetReferenceView = RealViews.transform(extendConstAndInterpolate(currentReference, refMean), originOffset);
+            RandomAccessibleInterval<FloatType> currentReference = referenceImage;
+
+            offsetReferenceView = RealViews.transform(extendConstAndInterpolate(currentReference, mean), originOffset);
 
             //Need to create a copy, so we can save the original image.
             logService.info("Applying threshold to moving image");
 
-            Img<FloatType> movingImage = getWorkingImg(originalMovingImage);
+            RandomAccessibleInterval tempMoving = getWorkingRAI(originalMovingImage);
             //Set up the running combined transform
-            AffineTransform3D currentTransform = centerOfGravityToOrigin(movingImage);
-//            moveMean = (float)0.0;
-            moveMean = ijOps.stats().mean(movingImage).getRealFloat();
-            movingImage.cursor().forEachRemaining((pixel) ->{pixel.setReal(pixel.getRealDouble()-moveMean);});
-
-            RealRandomAccessible extendedInterpolatedMoving = extendConstAndInterpolate(movingImage, moveMean);
+            AffineTransform3D currentTransform = centerOfGravityToOrigin(tempMoving);
+            RandomAccessibleInterval movingImage = Converters.convert(tempMoving, floatMinusMean, new FloatType());
+            RealRandomAccessible extendedInterpolatedMoving = extendConstAndInterpolate(movingImage, mean);
 
             for(B3dParameters resolution:resolutionList) {
 
                 logService.info("--Starting alignment at " + resolution.getSubsampleScale()[0] + " scaling factor, and "
-                + (180/(resolution.getRotationalScaleFactor()*Math.PI)) + " degrees rotational accuracy.");
+                + (180/(resolution.getRotationalScaleFactor()*Math.PI)) + " degrees rotational resolution.");
 
                 RealTransformRandomAccessible currentMovingView = RealViews.transform(extendedInterpolatedMoving, currentTransform);
 
                 if(!maskApplied && resolution.getTranslateByCorrelate()) {
                     logService.info("Applying mask to reference image");
-                    LoopBuilder.setImages(currentReference, referenceMask).forEachPixel((iPixel, mPixel) ->{
-                        if(!mPixel.get()){
-                            iPixel.setReal(-refMean);
-                        }
-                    });
+                    ImgLabeling labeledImg = ImgLabeling.fromImageAndLabels(referenceMask, new ArrayList(List.of("target")));
+                    LabelRegion region = new LabelRegions(labeledImg).getLabelRegion("target");
+                    currentReference = makeRai(region, referenceImage);
 
-                    offsetReferenceView = RealViews.transform(extendConstAndInterpolate(currentReference, refMean), originOffset);
                     maskApplied = true;
                 }
 
@@ -343,6 +345,21 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
         logService.info("Batch 3D registration finished.");
     }
 
+    private RandomAccessibleInterval makeRai(LabelRegion region, RandomAccessibleInterval<FloatType> image) {
+        Img<FloatType> tinyImg = (Img<FloatType>) ops.env().op("create.img").input(new FinalDimensions(region.dimensionsAsLongArray()), new FloatType()).apply();
+        RandomAccessibleInterval<FloatType> output = Views.translate(tinyImg, region.minAsLongArray());
+
+        IterableInterval ii = Regions.sample((IterableRegion<?>) region, image);
+
+        Cursor<FloatType> sampler = ii.localizingCursor();
+        RandomAccess<FloatType> targetWriter = output.randomAccess();
+        while(sampler.hasNext()){
+            sampler.fwd();
+            targetWriter.setPositionAndGet(sampler.positionAsLongArray()).set(sampler.get());
+        }
+        return output;
+    }
+
     private AffineTransform3D scaleTransform(AffineTransform3D input, double[] scale){
         input.set(input.get(0,3)/scale[0],0,3);
         input.set(input.get(1,3)/scale[1],1,3);
@@ -384,7 +401,7 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
                     RealViews.transform(RealViews.transform(interp, transform),originOffset.inverse()), dst3d);
 
             // Copy into the output
-            LoopBuilder.setImages(rotated, dst3d).forEachPixel((a, b) -> b.set(a));
+            LoopBuilder.setImages(rotated, dst3d).multiThreaded().forEachPixel((a, b) -> b.set(a));
         }
         return out;
     }
@@ -395,19 +412,19 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
 //        showStackedImages("Passed in", getCenteredImage(referenceSubsampled), getCenteredImage(movingSubsampled));
 
         rotator = new Rotation2D(referenceSubsampled, resolutionParams.getRotationalScaleFactor());
-        RealRandomAccessible interpolatedReference = extendConstAndInterpolate(referenceSubsampled, refMean);
+        RealRandomAccessible interpolatedReference = extendConstAndInterpolate(referenceSubsampled, mean);
 
         AffineTransform3D subsampledAlignment = new AffineTransform3D();
         subsampledAlignment.identity();
 
-        RealRandomAccessible<FloatType> interpolatedMoving = extendConstAndInterpolate(movingSubsampled, moveMean);
+        RealRandomAccessible<FloatType> interpolatedMoving = extendConstAndInterpolate(movingSubsampled, mean);
 
         //Need to somehow translate the data, and then make that the center of the interval...
         //for loop for sampling iterations starts here; do a test run with up to 5 loops at FULL sample rate, and save images at each iteration
 
         Double transformationMagnitude = Double.POSITIVE_INFINITY;
         int i = 0;
-        Double transformationMagnitudeTarget = 0.1;
+        Double transformationMagnitudeTarget = Double.MIN_VALUE;
         EvictingQueue<Double> lastThreeMagnitudes = EvictingQueue.create(4);
         boolean halfRotation = false;
 
@@ -521,7 +538,7 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
         );
     }
 
-    private void applyThreshold(RandomAccessibleInterval<FloatType> input, Double thresholdValue){
+    private void applyThreshold(RandomAccessibleInterval<? extends RealType> input, Double thresholdValue){
         LoopBuilder.setImages(input).multiThreaded().forEachPixel((p) ->{
             if(p.getRealDouble() < thresholdValue){
                 p.setReal(0.0);
@@ -575,7 +592,7 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
 
 
 
-    public AffineTransform3D centerOfGravityToOrigin(RandomAccessibleInterval<FloatType> target){
+    public AffineTransform3D centerOfGravityToOrigin(RandomAccessibleInterval<? extends RealType> target){
 
         /* Reference image center of gravity is already at origin, so only need to move the moving image to the origin.
          */
@@ -641,6 +658,8 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
         public AffineTransform3D findFullImageRotation(RandomAccessibleInterval<FloatType> reference, RandomAccessibleInterval<FloatType> moving) {
             HashMap<Integer, Img<FloatType>> axesToSearch = new HashMap<>(reference.numDimensions());
 
+//            showStackedImages("Stacked", reference, moving);
+
             AffineTransform3D currentRotation = new AffineTransform3D();
             currentRotation.identity();
 //            uiService.show("Moving in findFullImageRotation", datasetService.create(ImgView.wrap(moving)));
@@ -655,7 +674,7 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
             axesToSearch.put(1, (Img<FloatType>) ops.env().op("create.img").input(new FinalDimensions(sphericalInterval), new FloatType()).apply());
             axesToSearch.put(2, (Img<FloatType>) ops.env().op("create.img").input(new FinalDimensions(sphericalInterval), new FloatType()).apply());
 
-            RealRandomAccessible interpolatedMovingView = extendConstAndInterpolate(moving, moveMean);
+            RealRandomAccessible interpolatedMovingView = extendConstAndInterpolate(moving, mean);
 
             RealTransformRealRandomAccessible currentView = RealViews.transformReal(interpolatedMovingView, currentRotation);
 
@@ -684,12 +703,12 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
 
                 switch (axis) {
                     case 0:
-                        rotatedReferenceView = rotateImage(reference, refMean, rotate0to2);
-                        rotatedMovingView = rotateImage(moving, moveMean, rotate0to2);
+                        rotatedReferenceView = rotateImage(reference, mean, rotate0to2);
+                        rotatedMovingView = rotateImage(moving, mean, rotate0to2);
                         break;
                     case 1:
-                        rotatedReferenceView = rotateImage(reference, refMean, rotate1to2);
-                        rotatedMovingView = rotateImage(moving, moveMean, rotate1to2);
+                        rotatedReferenceView = rotateImage(reference, mean, rotate1to2);
+                        rotatedMovingView = rotateImage(moving, mean, rotate1to2);
                         break;
                     case 2:
                         rotatedReferenceView = reference;
@@ -836,10 +855,11 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
 //            uiService.show("Reference spherical", Views.rotate(Views.zeroMin(convertToSphericalCoordinates(reference)), 0, 2));
 //            uiService.show("Moving spherical", Views.rotate(Views.zeroMin(convertToSphericalCoordinates(moving)), 0, 2));
 
+
             fftConvolution = new FFTConvolution(
-                    new ExtendedRandomAccessibleInterval(convertToSphericalCoordinates(reference, refMean), new OutOfBoundsSpherical3DFactory<>(new FloatType(refMean))),
+                    new ExtendedRandomAccessibleInterval(convertToSphericalCoordinates(reference, mean), new OutOfBoundsSpherical3DFactory<>()),
                     correlationImage,
-                    new ExtendedRandomAccessibleInterval(convertToSphericalCoordinates(moving, moveMean), new OutOfBoundsSpherical3DFactory<>(new FloatType(moveMean))),
+                    new ExtendedRandomAccessibleInterval(convertToSphericalCoordinates(moving, mean), new OutOfBoundsSpherical3DFactory<>()),
                     correlationImage,
                     (ImgFactory<ComplexFloatType>) ops.env().op("create.imgFactory").input(correlationImage, new ComplexFloatType()).apply(),
                     service);
@@ -918,7 +938,7 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
                     );
             Img<FloatType> returnImg = (Img<FloatType>) ops.env().op("create.img").input(sphericalInterval, new FloatType()).apply();
 
-            LoopBuilder.setImages(returnImg, sphericalRAI).forEachPixel((r,s) ->{
+            LoopBuilder.setImages(returnImg, sphericalRAI).multiThreaded().forEachPixel((r,s) ->{
                 r.setReal(s.getRealFloat());
             });
 
@@ -938,7 +958,7 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
 
     /*
      * For spherical coordinate transform data, the Intensity values along the Pole axis (inclination 0 and 180), are
-     * repeated across all azimuthal values. During crossc-correlation of this spherical coordinate data this has the
+     * repeated across all azimuthal values. During cross-ccorrelation of this spherical coordinate data this has the
      * effect of enhancing the correlation for no inclination change, particularly if the polar axis happens to have a few
      * data points in alignment, even if the registration is actually off. There are a few options to correct for this
      * issue, though each has its own drawbacks:
@@ -959,7 +979,8 @@ public class Batch_3D_Registration <T extends RealType<T>, F extends FloatType, 
      *  its simplicity this is the method I first attempted.
      *
      *  4. We could change the intensity at the poles to 0. This way the poles would simply not contribute to the cross
-     *  correlation result at all.
+     *  correlation result at all. However, for incline rotation transforms, this completely eliminates 4 rows of data,
+     *  resulting in a very consistant lower value for incline rotations.
      */
     private void compensateForPoleRepeat(RandomAccessibleInterval<FloatType> input){
         final long inclinationSize = input.dimension(1);
