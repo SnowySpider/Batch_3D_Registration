@@ -1,4 +1,5 @@
 import batch3Dregistration.Batch_3D_Registration
+import net.imagej.Dataset
 import net.imagej.ImageJ
 import org.scijava.command.CommandInfo
 import org.scijava.module.ModuleInfo
@@ -12,8 +13,8 @@ ij.module().addModule(batch3Dmodule);
 
 //Dataset ref = ij.scifio().datasetIO().open("../resources/ref,mri-stack.tif");
 //
-//Dataset ref = ij.scifio().datasetIO().open("../resources/ref,mri-stack.tif");
-//Dataset multiple = ij.scifio().datasetIO().open("../resources/mri-stack-arbitrary-multiaxis rotation.tif");
+Dataset ref = ij.scifio().datasetIO().open("../resources/ref,mri-stack.tif");
+Dataset multiple = ij.scifio().datasetIO().open("../resources/mri-stack-arbitrary-multiaxis rotation.tif");
 
 ij.module().run(batch3Dmodule,
     true,

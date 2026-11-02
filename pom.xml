@@ -95,7 +95,7 @@
         <dependency>
             <groupId>net.imglib2</groupId>
             <artifactId>imglib2-ij</artifactId>
-            <version>2.0.1</version>
+            <version>2.0.3</version>
         </dependency>
 
         <dependency>
@@ -120,6 +120,18 @@
         <dependency>
             <groupId>org.scijava</groupId>
             <artifactId>scijava-ops-image</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.scijava</groupId>
+            <artifactId>scijava-ops-engine</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.scijava</groupId>
+            <artifactId>scijava-ops-spi</artifactId>
             <version>1.0.0</version>
         </dependency>
 
